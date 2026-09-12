@@ -9,10 +9,14 @@ public final class otk {
         this(builder.a, builder.b, builder.c);
     }
 
-    otk(oth type, oud[] entries, String[] labels) {
+    public otk(oth type, oud[] entries, String[] labels) {
         c = type;
         d = entries;
         n = labels;
+    }
+
+    public oud b() {
+        return d == null || d.length == 0 ? null : d[0];
     }
 
     @Override

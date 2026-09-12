@@ -107,12 +107,24 @@ public final class GboardSettingsGroupingTest {
                 "new GboardTopRowSwipeSettingsFeature(context)",
                 "new GboardManualIncognitoSettingsFeature(context)",
                 "new GboardLongPressQuickActionsSettingsFeature(context)",
-                "new GboardOcrSettingsFeature(context)");
+                "new GboardCursorTrackpadSettingsFeature(context)",
+                "new GboardOcrSettingsFeature(context)",
+                "new GboardQuickInsertSettingsFeature(context)",
+                "new GboardFloatingWebSearchSettingsFeature(context)");
         assertInOrder(layoutGroupSource.substring(layoutGroupSource.indexOf("Arrays.asList(")),
+                "new GboardSpacebarLogoSettingsFeature(context)",
+                "new GboardFlowModeSettingsFeature(context)",
+                "new GboardCloseProactiveSuggestionsSettingsFeature(context)",
                 "new GboardLatinGlobeKeyIgnoreIntervalSettingsFeature(context)",
                 "new GboardEnglishUppercaseToggleSettingsFeature(context)",
                 "new GboardZhuyinBottomRowWeightSettingsFeature(context)",
-                "new GboardSymbolFooterOrderSettingsFeature(context)");
+                "new GboardSymbolFooterOrderSettingsFeature(context)",
+                "new GboardEmojiSizeSettingsFeature(context)",
+                "new GboardAccessPointsMenuSettingsFeature(context)",
+                "new GboardSplitKeyboardSettingsFeature(context)",
+                "new GboardAccessibilityLayoutSettingsFeature(context)",
+                "new GboardRoundedKeyboardSettingsFeature(context)",
+                "new GboardAccessPointCountSettingsFeature(context)");
         Assert.assertFalse(registrySource.contains("GboardKeyboardSettingsGroupFeature"));
     }
 
@@ -126,6 +138,15 @@ public final class GboardSettingsGroupingTest {
         Assert.assertTrue(availabilitySource.contains("FEATURE_BLUETOOTH_MICROPHONE"));
         Assert.assertTrue(availabilitySource.contains(
                 "dev.jason.gboardpatches.feature.bluetooth_microphone"));
+        Assert.assertTrue(availabilitySource.contains(
+                "dev.jason.gboardpatches.feature.close_proactive_suggestions"));
+        Assert.assertTrue(availabilitySource.contains(
+                "dev.jason.gboardpatches.feature.flow_mode_animation"));
+        Assert.assertTrue(availabilitySource.contains(
+                "dev.jason.gboardpatches.feature.quick_insert"));
+        Assert.assertTrue(availabilitySource.contains("FEATURE_ACCESS_POINT_COUNT"));
+        Assert.assertTrue(availabilitySource.contains(
+                "dev.jason.gboardpatches.feature.access_point_count"));
     }
 
     @Test

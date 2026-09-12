@@ -1,9 +1,12 @@
 package dev.jason.gboardpatches.extension.settings;
 
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +15,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -33,6 +37,8 @@ import android.speech.RecognitionSupport;
 import android.speech.RecognitionSupportCallback;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
@@ -41,6 +47,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.animation.LinearInterpolator;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -70,20 +77,19 @@ import java.util.concurrent.RejectedExecutionException;
 
 import dev.jason.gboardpatches.extension.R;
 import dev.jason.gboardpatches.extension.BuildConfig;
-import dev.jason.gboardpatches.extension.clipboard.GboardClipboardSettingsFeature;
+import dev.jason.gboardpatches.extension.backuprestore.GboardExportFileNames;
+import dev.jason.gboardpatches.extension.settings.keyboardpreview.GboardKeyboardPreviewController;
 
 public final class GboardPatchesSettingsActivity extends Activity
         implements GboardPatchesSettingsContract.Host {
     private static final String TAG = "GboardPatches";
-    private static final String ACTION_QS_TILE_PREFERENCES =
-            "android.service.quicksettings.action.QS_TILE_PREFERENCES";
-    private static final String EXTRA_OPEN_WEB_CLIPBOARD =
-            "dev.jason.gboardpatches.extension.extra.OPEN_WEB_CLIPBOARD";
+    public static final String EXTRA_NAVIGATION_PATH =
+            "dev.jason.gboardpatches.extension.extra.PATCHES_NAVIGATION_PATH";
     private static final String ENTER_PREF_HEADER_EXTRA = "ENTER_PREF_HEADER";
     private static final String GBOARD_SETTINGS_ACTIVITY_CLASS =
             "com.google.android.apps.inputmethod.latin.preference.SettingsActivity";
     private static final String SUPPORTED_DEVELOPER_OPTIONS_TARGET_VERSION =
-            "17.7.7.932364120-release-arm64-v8a";
+            "18.0.3.954559732-release-arm64-v8a";
     private static final String GBOARD_PACKAGE_STABLE =
             "com.google.android.inputmethod.latin";
     private static final String GBOARD_PACKAGE_JASON_DEV =
@@ -103,8 +109,15 @@ public final class GboardPatchesSettingsActivity extends Activity
             "https://play.google.com/store/apps/details?id=com.google.audio.hearing.visualization.accessibility.scribe";
     private static final String PLAY_STORE_PACKAGE_NAME = "com.android.vending";
     private static final long OFFLINE_SPEECH_LANGUAGE_QUERY_TIMEOUT_MS = 10_000L;
+    private static final long RESTART_ICON_ROTATION_DURATION_MS = 700L;
+    private static final long RESTART_DELAY_MS = 500L;
+    private static final long RESTART_CRASH_RECOVERY_RESTORE_DELAY_MS = 2000L;
     private static final int REQUEST_CREATE_TEXT_DOCUMENT = 0x4742;
     private static final int REQUEST_OPEN_TEXT_DOCUMENT = 0x4743;
+    private static final int REQUEST_OPEN_DOCUMENT_TREE = 0x4746;
+    private static final int REQUEST_RUNTIME_PERMISSION = 0x4747;
+    private static final int REQUEST_CREATE_BINARY_DOCUMENT = 0x4748;
+    private static final int REQUEST_OPEN_BINARY_DOCUMENT = 0x4749;
     private static final int TOOLBAR_HEIGHT_DP = 56;
     private static final int NO_SCROLL_POSITION_REQUESTED = -1;
     private static final String TOOLBAR_TITLE_PATCHES = "Patches";
@@ -118,12 +131,16 @@ public final class GboardPatchesSettingsActivity extends Activity
     private Palette palette;
     private LinearLayout toolbarView;
     private TextView toolbarTitleView;
+    private View restartButton;
+    private ObjectAnimator restartButtonAnimator;
     private TextView headerBadgeView;
     private TextView headerTitleView;
     private TextView headerSummaryView;
     private LinearLayout panelContainer;
     private ScrollView contentScrollView;
     private LinearLayout contentColumn;
+    private LinearLayout screenActionContainer;
+    private GboardKeyboardPreviewController keyboardPreviewController;
     private List<GboardPatchesSettingsContract.Feature> features;
     private final GboardPatchesSettingsOrchestrator<GboardPatchesSettingsContract.Feature,
             GboardPatchesSettingsContract.Intent>
@@ -154,6 +171,12 @@ public final class GboardPatchesSettingsActivity extends Activity
     private boolean initialFeatureFromIntentHandled;
     private PendingTextDocumentWrite pendingTextDocumentWrite;
     private GboardPatchesSettingsContract.StringValueConsumer pendingTextDocumentReader;
+    private PendingBinaryDocumentWrite pendingBinaryDocumentWrite;
+    private GboardPatchesSettingsContract.BinaryDocumentConsumer pendingBinaryDocumentReader;
+    private GboardPatchesSettingsContract.StringValueConsumer pendingDocumentTreeConsumer;
+    private GboardPatchesSettingsContract.Feature lifecycleVisibleFeature;
+    private boolean featureLifecycleEnabled;
+    private GboardPatchesSettingsContract.BooleanValueConsumer pendingPermissionConsumer;
     private volatile GboardPatchesSettingsContract.OfflineSpeechLanguages offlineSpeechLanguages =
             GboardPatchesSettingsContract.OfflineSpeechLanguages.loading();
     private SpeechRecognizer offlineSpeechRecognizer;
@@ -170,6 +193,7 @@ public final class GboardPatchesSettingsActivity extends Activity
         setTheme(resolveActivityTheme());
         super.onCreate(savedInstanceState);
         try {
+            scheduleRestartCrashRecoveryGuardRestore();
             palette = Palette.forConfiguration(getResources().getConfiguration());
             features = Collections.emptyList();
             featuresInitialized = false;
@@ -187,25 +211,22 @@ public final class GboardPatchesSettingsActivity extends Activity
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        setRestartButtonPending(false);
         initialFeatureFromIntentHandled = false;
         scheduleDeferredRender();
-    }
-
-    public static Intent createWebClipboardSettingsIntent(Context context) {
-        Intent intent = new Intent(context, GboardPatchesSettingsActivity.class);
-        intent.putExtra(EXTRA_OPEN_WEB_CLIPBOARD, true);
-        return intent;
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        featureLifecycleEnabled = true;
         applyOrchestration(settingsOrchestrator.accept(
                 GboardPatchesSettingsOrchestrator.Event.resume()));
     }
 
     @Override
     protected void onPause() {
+        featureLifecycleEnabled = false;
         applyOrchestration(settingsOrchestrator.accept(
                 GboardPatchesSettingsOrchestrator.Event.pause()));
         cancelDeferredRender();
@@ -215,11 +236,14 @@ public final class GboardPatchesSettingsActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        featureLifecycleEnabled = false;
         applyOrchestration(settingsOrchestrator.accept(
                 GboardPatchesSettingsOrchestrator.Event.pause()));
+        setRestartButtonPending(false);
         cancelDeferredRender();
         cancelOfflineSpeechLanguageQuery();
         unregisterBackCallback();
+        detachKeyboardPreviewSafely();
         screenBuildExecutor.shutdownNow();
         backgroundStateExecutor.shutdownNow();
         super.onDestroy();
@@ -291,18 +315,27 @@ public final class GboardPatchesSettingsActivity extends Activity
         if (headerKeyResourceId == 0) {
             return;
         }
-        for (String packageName : targetSettingsPackages()) {
-            if (tryLaunchTargetSettingsHeader(packageName, headerKeyResourceId)) {
-                return;
-            }
+        String currentPackage = getPackageName();
+        if (!isSupportedTargetPackage(currentPackage)) {
+            showUnsupportedDeveloperOptionsPackageDialog(currentPackage, headerKeyResourceId);
+            return;
+        }
+        if (tryLaunchTargetSettingsHeader(currentPackage, headerKeyResourceId, false)) {
+            return;
         }
         throw new ActivityNotFoundException(
                 "No supported Gboard Developer options entry is available");
     }
 
     private boolean tryLaunchTargetSettingsHeader(String packageName, int headerKeyResourceId) {
+        return tryLaunchTargetSettingsHeader(packageName, headerKeyResourceId, false);
+    }
+
+    private boolean tryLaunchTargetSettingsHeader(String packageName, int headerKeyResourceId,
+            boolean allowUnknownVersion) {
         String targetVersionName = targetPackageVersionName(packageName);
-        if (!isSupportedDeveloperOptionsTargetVersion(targetVersionName)) {
+        if (!allowUnknownVersion
+                && !isSupportedDeveloperOptionsTargetVersion(targetVersionName)) {
             return false;
         }
 
@@ -317,6 +350,55 @@ public final class GboardPatchesSettingsActivity extends Activity
         }
     }
 
+    private void showUnsupportedDeveloperOptionsPackageDialog(String packageName,
+            int headerKeyResourceId) {
+        String safePackageName = packageName == null ? "" : packageName;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.gboard_patches_developer_options_package_warning_title)
+                .setMessage(GboardSettingsText.format(
+                        this,
+                        R.string.gboard_patches_developer_options_package_warning_message,
+                        safePackageName))
+                .setNegativeButton(R.string.gboard_patches_dialog_close, null)
+                .setPositiveButton(R.string.gboard_patches_developer_options_try_anyway,
+                        (ignored, which) -> tryLaunchUnverifiedDeveloperOptions(
+                                safePackageName,
+                                headerKeyResourceId))
+                .create();
+        dialog.setOnDismissListener(ignored -> onManagedDialogDismissed());
+        try {
+            dialog.show();
+            onManagedDialogShown();
+            tintDialogButtons(dialog);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Unable to show unsupported Gboard package warning", throwable);
+            showDeveloperOptionsLaunchFailure(safePackageName);
+        }
+    }
+
+    private void tryLaunchUnverifiedDeveloperOptions(String packageName,
+            int headerKeyResourceId) {
+        try {
+            if (!tryLaunchTargetSettingsHeader(packageName, headerKeyResourceId, true)) {
+                showDeveloperOptionsLaunchFailure(packageName);
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Unable to open Developer options for " + packageName, throwable);
+            showDeveloperOptionsLaunchFailure(packageName);
+        }
+    }
+
+    private void showDeveloperOptionsLaunchFailure(String packageName) {
+        Toast.makeText(
+                this,
+                GboardSettingsText.format(
+                        this,
+                        R.string.gboard_patches_developer_options_launch_failed,
+                        packageName),
+                Toast.LENGTH_LONG)
+                .show();
+    }
+
     private String targetPackageVersionName(String packageName) {
         try {
             PackageInfo packageInfo = getPackageManager().getPackageInfo(packageName, 0);
@@ -329,7 +411,7 @@ public final class GboardPatchesSettingsActivity extends Activity
     private List<String> targetSettingsPackages() {
         Set<String> packageNames = new LinkedHashSet<String>();
         String currentPackage = getPackageName();
-        if (isSupportedTargetPackage(currentPackage)) {
+        if (currentPackage != null && !currentPackage.isEmpty()) {
             packageNames.add(currentPackage);
         }
         packageNames.add(GBOARD_PACKAGE_STABLE);
@@ -364,7 +446,9 @@ public final class GboardPatchesSettingsActivity extends Activity
                     pendingSelectionAction[0] = () -> runSafely(
                             "handle choice dialog selection",
                             () -> {
-                                if (customValue.equals(selectedValue)) {
+                                if (customValue != null
+                                        && customAction != null
+                                        && customValue.equals(selectedValue)) {
                                     customAction.run();
                                 } else {
                                     valueConsumer.accept(selectedValue);
@@ -390,6 +474,64 @@ public final class GboardPatchesSettingsActivity extends Activity
             tintDialogButtons(dialog);
         } catch (Throwable throwable) {
             Log.w(TAG, "Failed to show choice dialog", throwable);
+        }
+    }
+
+    @Override
+    public void showMultiChoiceDialog(String title, String[] labels, String[] values,
+            boolean[] initiallySelected,
+            String positiveLabel,
+            GboardPatchesSettingsContract.StringListConsumer valueConsumer) {
+        if (labels == null || values == null || initiallySelected == null
+                || labels.length != values.length
+                || labels.length != initiallySelected.length
+                || valueConsumer == null) {
+            return;
+        }
+        boolean[] selected = initiallySelected.clone();
+        final Runnable[] pendingAction = new Runnable[1];
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMultiChoiceItems(labels, selected,
+                        (ignored, which, checked) -> {
+                            if (which >= 0 && which < selected.length) {
+                                selected[which] = checked;
+                            }
+                        })
+                .setPositiveButton(positiveLabel, null)
+                .setNegativeButton(text(R.string.gboard_patches_dialog_cancel), null);
+        AlertDialog dialog = builder.create();
+        dialog.setOnShowListener(ignored -> {
+            tintDialogButtons(dialog);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                List<String> chosen = new ArrayList<String>();
+                for (int index = 0; index < values.length; index++) {
+                    if (selected[index]) {
+                        chosen.add(values[index]);
+                    }
+                }
+                if (chosen.isEmpty()) {
+                    return;
+                }
+                pendingAction[0] = () -> runSafely(
+                        "handle multi-choice dialog selection",
+                        () -> valueConsumer.accept(chosen));
+                dialog.dismiss();
+            });
+        });
+        dialog.setOnDismissListener(ignored -> {
+            Runnable action = pendingAction[0];
+            pendingAction[0] = null;
+            onManagedDialogDismissed();
+            if (action != null) {
+                postToDecorView(action);
+            }
+        });
+        try {
+            dialog.show();
+            onManagedDialogShown();
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to show multi-choice dialog", throwable);
         }
     }
 
@@ -429,6 +571,8 @@ public final class GboardPatchesSettingsActivity extends Activity
                     consumer.accept(value);
                     dialog.dismiss();
                     renderCurrentScreenSafely();
+                } catch (IllegalArgumentException exception) {
+                    input.setError(exception.getMessage());
                 } catch (Throwable throwable) {
                     Log.w(TAG, "Failed to persist positive integer setting", throwable);
                     input.setError(text(R.string.gboard_patches_dialog_error_save_failed));
@@ -705,7 +849,8 @@ public final class GboardPatchesSettingsActivity extends Activity
         intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         intent.setType(normalizeMimeType(mimeType));
         if (fileName != null && !fileName.trim().isEmpty()) {
-            intent.putExtra(Intent.EXTRA_TITLE, fileName.trim());
+            intent.putExtra(Intent.EXTRA_TITLE,
+                    GboardExportFileNames.timestamped(fileName.trim()));
         }
         try {
             startActivityForResult(intent, REQUEST_CREATE_TEXT_DOCUMENT);
@@ -730,6 +875,7 @@ public final class GboardPatchesSettingsActivity extends Activity
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
         String[] normalizedMimeTypes = normalizeMimeTypes(mimeTypes);
         intent.setType(normalizedMimeTypes.length == 1
                 ? normalizedMimeTypes[0]
@@ -751,6 +897,183 @@ public final class GboardPatchesSettingsActivity extends Activity
 
     @Override
     @SuppressWarnings("deprecation")
+    public void createBinaryDocument(String fileName, String mimeType, byte[] data,
+            Runnable completionAction) {
+        pendingBinaryDocumentWrite = new PendingBinaryDocumentWrite(
+                data == null ? new byte[0] : data.clone(), completionAction);
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                .setType(normalizeMimeType(mimeType));
+        if (fileName != null && !fileName.isBlank()) {
+            intent.putExtra(Intent.EXTRA_TITLE,
+                    GboardExportFileNames.timestamped(fileName.trim()));
+        }
+        try {
+            startActivityForResult(intent, REQUEST_CREATE_BINARY_DOCUMENT);
+        } catch (Throwable throwable) {
+            pendingBinaryDocumentWrite = null;
+            Log.w(TAG, "Failed to launch binary document create picker", throwable);
+            Toast.makeText(this, DOCUMENT_PICKER_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void openBinaryDocument(String[] mimeTypes,
+            GboardPatchesSettingsContract.BinaryDocumentConsumer documentConsumer) {
+        if (documentConsumer == null) {
+            return;
+        }
+        pendingBinaryDocumentReader = documentConsumer;
+        String[] normalizedMimeTypes = normalizeMimeTypes(mimeTypes);
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+                .setType(normalizedMimeTypes.length == 1 ? normalizedMimeTypes[0] : "*/*");
+        if (normalizedMimeTypes.length > 1) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, normalizedMimeTypes);
+        }
+        try {
+            startActivityForResult(intent, REQUEST_OPEN_BINARY_DOCUMENT);
+        } catch (Throwable throwable) {
+            pendingBinaryDocumentReader = null;
+            Log.w(TAG, "Failed to launch binary document open picker", throwable);
+            Toast.makeText(this, DOCUMENT_PICKER_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void requestTargetRestart() {
+        requestGboardRestart();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void openDocumentTree(String initialTreeUri,
+            GboardPatchesSettingsContract.StringValueConsumer valueConsumer) {
+        if (valueConsumer == null) {
+            return;
+        }
+        pendingDocumentTreeConsumer = valueConsumer;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && initialTreeUri != null && initialTreeUri.startsWith("content://")) {
+            try {
+                intent.putExtra("android.provider.extra.INITIAL_URI", Uri.parse(initialTreeUri));
+            } catch (Throwable ignored) {
+                // The picker can still open without an initial location.
+            }
+        }
+        try {
+            startActivityForResult(intent, REQUEST_OPEN_DOCUMENT_TREE);
+        } catch (ActivityNotFoundException ignored) {
+            pendingDocumentTreeConsumer = null;
+            Toast.makeText(this, DOCUMENT_PICKER_FAILED, Toast.LENGTH_SHORT).show();
+        } catch (Throwable throwable) {
+            pendingDocumentTreeConsumer = null;
+            Log.w(TAG, "Failed to launch document tree picker", throwable);
+            Toast.makeText(this, DOCUMENT_PICKER_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void requestRuntimePermission(String permission,
+            GboardPatchesSettingsContract.BooleanValueConsumer resultConsumer) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> requestRuntimePermission(permission, resultConsumer));
+            return;
+        }
+        if (permission == null || permission.isBlank() || resultConsumer == null) {
+            return;
+        }
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+            resultConsumer.accept(true);
+            return;
+        }
+        if (pendingPermissionConsumer != null) {
+            resultConsumer.accept(false);
+            return;
+        }
+        pendingPermissionConsumer = resultConsumer;
+        try {
+            requestPermissions(new String[]{permission}, REQUEST_RUNTIME_PERMISSION);
+        } catch (Throwable throwable) {
+            pendingPermissionConsumer = null;
+            Log.w(TAG, "Failed to request runtime permission " + permission, throwable);
+            resultConsumer.accept(false);
+        }
+    }
+
+    @Override
+    public void openAllFilesAccessSettings(String unavailableMessage) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> openAllFilesAccessSettings(unavailableMessage));
+            return;
+        }
+        Intent appIntent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                .setData(Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(appIntent);
+        } catch (ActivityNotFoundException ignored) {
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            } catch (Throwable throwable) {
+                Log.w(TAG, "Failed to launch all files access settings", throwable);
+                Toast.makeText(this, unavailableMessage == null ? "" : unavailableMessage,
+                        Toast.LENGTH_LONG).show();
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to launch app all files access settings", throwable);
+            Toast.makeText(this, unavailableMessage == null ? "" : unavailableMessage,
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    public void openBatteryOptimizationSettings(String unavailableMessage) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> openBatteryOptimizationSettings(unavailableMessage));
+            return;
+        }
+        Intent appIntent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(appIntent);
+        } catch (ActivityNotFoundException ignored) {
+            openBatteryOptimizationSettingsFallback(unavailableMessage);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to launch app battery optimization settings", throwable);
+            openBatteryOptimizationSettingsFallback(unavailableMessage);
+        }
+    }
+
+    private void openBatteryOptimizationSettingsFallback(String unavailableMessage) {
+        try {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to launch battery optimization settings", throwable);
+            Toast.makeText(this, unavailableMessage == null ? "" : unavailableMessage,
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    public void showMessage(String message) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> showMessage(message));
+            return;
+        }
+        Toast.makeText(this, message == null ? "" : message, Toast.LENGTH_LONG).show();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CREATE_TEXT_DOCUMENT) {
@@ -759,6 +1082,34 @@ public final class GboardPatchesSettingsActivity extends Activity
         }
         if (requestCode == REQUEST_OPEN_TEXT_DOCUMENT) {
             handleOpenTextDocumentResult(resultCode, data);
+            return;
+        }
+        if (requestCode == REQUEST_OPEN_DOCUMENT_TREE) {
+            handleOpenDocumentTreeResult(resultCode, data);
+            return;
+        }
+        if (requestCode == REQUEST_CREATE_BINARY_DOCUMENT) {
+            handleCreateBinaryDocumentResult(resultCode, data);
+            return;
+        }
+        if (requestCode == REQUEST_OPEN_BINARY_DOCUMENT) {
+            handleOpenBinaryDocumentResult(resultCode, data);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+            int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_RUNTIME_PERMISSION) {
+            return;
+        }
+        GboardPatchesSettingsContract.BooleanValueConsumer consumer = pendingPermissionConsumer;
+        pendingPermissionConsumer = null;
+        if (consumer != null) {
+            consumer.accept(grantResults != null
+                    && grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED);
         }
     }
 
@@ -1018,15 +1369,124 @@ public final class GboardPatchesSettingsActivity extends Activity
     private void handleOpenTextDocumentResult(int resultCode, Intent data) {
         GboardPatchesSettingsContract.StringValueConsumer reader = pendingTextDocumentReader;
         pendingTextDocumentReader = null;
-        if (resultCode != RESULT_OK || data == null || data.getData() == null
-                || reader == null) {
+        Uri uri = selectedDocumentUri(data);
+        if (resultCode != RESULT_OK || uri == null || reader == null) {
             return;
         }
         try {
-            reader.accept(readTextDocument(data.getData()));
+            reader.accept(readTextDocument(uri));
         } catch (Throwable throwable) {
             Log.w(TAG, "Failed to read selected document", throwable);
             Toast.makeText(this, DOCUMENT_READ_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void handleCreateBinaryDocumentResult(int resultCode, Intent data) {
+        PendingBinaryDocumentWrite pendingWrite = pendingBinaryDocumentWrite;
+        pendingBinaryDocumentWrite = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null
+                || pendingWrite == null) {
+            return;
+        }
+        try (OutputStream output = getContentResolver().openOutputStream(data.getData(), "wt")) {
+            if (output == null) {
+                throw new java.io.IOException("Content resolver returned null output stream");
+            }
+            output.write(pendingWrite.data);
+            output.flush();
+            if (pendingWrite.completionAction != null) {
+                pendingWrite.completionAction.run();
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to write selected binary document", throwable);
+            Toast.makeText(this, DOCUMENT_WRITE_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void handleOpenBinaryDocumentResult(int resultCode, Intent data) {
+        GboardPatchesSettingsContract.BinaryDocumentConsumer reader =
+                pendingBinaryDocumentReader;
+        pendingBinaryDocumentReader = null;
+        Uri uri = selectedDocumentUri(data);
+        if (resultCode != RESULT_OK || uri == null || reader == null) {
+            return;
+        }
+        try {
+            reader.accept(new GboardPatchesSettingsContract.BinaryDocument(
+                    queryDisplayName(uri), getContentResolver().getType(uri),
+                    readBinaryDocument(uri)));
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to read selected binary document", throwable);
+            Toast.makeText(this, DOCUMENT_READ_FAILED, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static Uri selectedDocumentUri(Intent data) {
+        if (data == null) {
+            return null;
+        }
+        Uri direct = data.getData();
+        if (direct != null) {
+            return direct;
+        }
+        ClipData clipData = data.getClipData();
+        if (clipData == null || clipData.getItemCount() == 0) {
+            return null;
+        }
+        ClipData.Item first = clipData.getItemAt(0);
+        return first == null ? null : first.getUri();
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    return cursor.getString(index);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Fall back to the URI path below.
+        }
+        return uri.getLastPathSegment();
+    }
+
+    private byte[] readBinaryDocument(Uri uri) throws java.io.IOException {
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) {
+                throw new java.io.IOException("Content resolver returned null input stream");
+            }
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private void handleOpenDocumentTreeResult(int resultCode, Intent data) {
+        GboardPatchesSettingsContract.StringValueConsumer consumer = pendingDocumentTreeConsumer;
+        pendingDocumentTreeConsumer = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null
+                || consumer == null) {
+            return;
+        }
+        Uri treeUri = data.getData();
+        int grantFlags = data.getFlags()
+                & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if ((grantFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION) == 0) {
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri, grantFlags);
+            consumer.accept(treeUri.toString());
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to persist selected document tree", throwable);
+            Toast.makeText(this, DOCUMENT_PICKER_FAILED, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1100,14 +1560,20 @@ public final class GboardPatchesSettingsActivity extends Activity
     }
 
     private View buildContentView() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(palette.windowBackground);
         root.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
-        root.addView(buildToolbar());
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
+        shell.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(shell);
+
+        shell.addView(buildToolbar());
 
         contentScrollView = new ScrollView(this);
         contentScrollView.setClipToPadding(false);
@@ -1129,7 +1595,23 @@ public final class GboardPatchesSettingsActivity extends Activity
         contentColumn.addView(buildPanelCard());
 
         contentScrollView.addView(contentColumn);
-        root.addView(contentScrollView);
+        shell.addView(contentScrollView);
+
+        screenActionContainer = new LinearLayout(this);
+        screenActionContainer.setOrientation(LinearLayout.VERTICAL);
+        screenActionContainer.setPadding(dp(16), dp(8), dp(16), dp(16));
+        screenActionContainer.setVisibility(View.GONE);
+        shell.addView(screenActionContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        keyboardPreviewController = new GboardKeyboardPreviewController(
+                this,
+                this::targetSettingsPackages,
+                this::onManagedDialogShown,
+                this::onManagedDialogDismissed,
+                palette.accent,
+                palette.windowBackground);
+        keyboardPreviewController.attachTo(root);
         return root;
     }
 
@@ -1157,7 +1639,226 @@ public final class GboardPatchesSettingsActivity extends Activity
 
         toolbarView.addView(backButton);
         toolbarView.addView(toolbarTitleView);
+        toolbarView.addView(buildRestartButton());
         return toolbarView;
+    }
+
+    private View buildRestartButton() {
+        String restartLabel = text(R.string.gboard_patches_restart_action);
+        restartButton = new View(this) {
+            private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Path path = new Path();
+
+            {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                paint.setStrokeJoin(Paint.Join.ROUND);
+                paint.setStrokeWidth(getResources().getDisplayMetrics().density * 1.8f);
+            }
+
+            @Override
+            protected void onDraw(Canvas canvas) {
+                super.onDraw(canvas);
+                float density = getResources().getDisplayMetrics().density;
+                float iconSize = density * 24f;
+                float left = (getWidth() - iconSize) / 2f;
+                float top = (getHeight() - iconSize) / 2f;
+                float scale = iconSize / 24f;
+
+                paint.setColor(palette.accent);
+                path.reset();
+                path.moveTo(left + (4.48f * scale), top + (14.5f * scale));
+                path.cubicTo(
+                        left + (5.6f * scale), top + (17.7f * scale),
+                        left + (8.65f * scale), top + (20f * scale),
+                        left + (12.25f * scale), top + (20f * scale));
+                path.cubicTo(
+                        left + (16.8f * scale), top + (20f * scale),
+                        left + (20.5f * scale), top + (16.3f * scale),
+                        left + (20.5f * scale), top + (11.75f * scale));
+                path.cubicTo(
+                        left + (20.5f * scale), top + (7.2f * scale),
+                        left + (16.8f * scale), top + (3.5f * scale),
+                        left + (12.25f * scale), top + (3.5f * scale));
+                path.cubicTo(
+                        left + (8.55f * scale), top + (3.5f * scale),
+                        left + (5.55f * scale), top + (5.95f * scale),
+                        left + (4.5f * scale), top + (9.5f * scale));
+                canvas.drawPath(path, paint);
+
+                path.reset();
+                path.moveTo(left + (4.5f * scale), top + (4.5f * scale));
+                path.lineTo(left + (4.5f * scale), top + (9.5f * scale));
+                path.lineTo(left + (9.5f * scale), top + (9.5f * scale));
+                canvas.drawPath(path, paint);
+            }
+        };
+        restartButton.setContentDescription(restartLabel);
+        restartButton.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
+        restartButton.setBackground(buildRippleDrawable(dp(24)));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            restartButton.setTooltipText(restartLabel);
+        } else {
+            restartButton.setOnLongClickListener(view -> {
+                showSafeToast(R.string.gboard_patches_restart_action);
+                return true;
+            });
+        }
+        restartButton.setOnClickListener(view -> requestGboardRestart());
+        return restartButton;
+    }
+
+    private void scheduleRestartCrashRecoveryGuardRestore() {
+        try {
+            Context applicationContext = getApplicationContext();
+            Context restoreContext = applicationContext != null ? applicationContext : this;
+            boolean scheduled = screenRefreshHandler.postDelayed(
+                    () -> restoreRestartCrashRecoveryGuard(restoreContext),
+                    RESTART_CRASH_RECOVERY_RESTORE_DELAY_MS);
+            if (!scheduled) {
+                Log.w(TAG, "Failed to schedule Gboard crash recovery cleanup restoration");
+            }
+        } catch (Throwable throwable) {
+            try {
+                Log.w(TAG, "Failed to defer Gboard crash recovery cleanup restoration", throwable);
+            } catch (Throwable ignored) {
+                // The restart guard must never escape into the host app.
+            }
+        }
+    }
+
+    private void restoreRestartCrashRecoveryGuard(Context context) {
+        try {
+            if (!GboardRestartCrashRecoveryGuard.restoreIfPending(context)) {
+                Log.w(TAG, "Failed to restore Gboard crash recovery cleanup setting");
+            }
+        } catch (Throwable throwable) {
+            try {
+                Log.w(TAG, "Failed to run Gboard crash recovery cleanup restoration", throwable);
+            } catch (Throwable ignored) {
+                // The restart guard must never escape into the host app.
+            }
+        }
+    }
+
+    private void requestGboardRestart() {
+        try {
+            GboardPatchesSettingsOrchestrator.State<GboardPatchesSettingsContract.Feature> state =
+                    settingsOrchestrator.snapshot();
+            ArrayList<String> navigationPath = GboardPatchesNavigationPath.capture(
+                    state.getBackStack(), state.getCurrent());
+
+            Context applicationContext = getApplicationContext();
+            Context restartContext = applicationContext != null ? applicationContext : this;
+            if (!GboardRestartCrashRecoveryGuard.prepare(restartContext)) {
+                handleRestartFailure("Failed to prepare safe Gboard restart", null);
+                return;
+            }
+            setRestartButtonPending(true);
+            boolean scheduled = screenRefreshHandler.postDelayed(
+                    () -> coldRestartGboard(restartContext, navigationPath),
+                    RESTART_DELAY_MS);
+            if (!scheduled) {
+                handleRestartFailure("Failed to schedule Gboard restart", null);
+            }
+        } catch (Throwable throwable) {
+            handleRestartFailure("Failed to request Gboard restart", throwable);
+        }
+    }
+
+    private void coldRestartGboard(Context context, ArrayList<String> navigationPath) {
+        try {
+            ComponentName patchesComponent =
+                    new ComponentName(context, GboardPatchesSettingsActivity.class);
+            Intent restartIntent = Intent.makeRestartActivityTask(patchesComponent);
+            restartIntent.putStringArrayListExtra(EXTRA_NAVIGATION_PATH, navigationPath);
+            restartIntent.setPackage(context.getPackageName());
+            context.startActivity(restartIntent);
+            System.exit(0);
+        } catch (Throwable throwable) {
+            handleRestartFailure("Failed to cold restart Gboard", throwable);
+        }
+    }
+
+    private void setRestartButtonPending(boolean pending) {
+        try {
+            if (!pending) {
+                stopRestartButtonAnimation();
+            }
+            if (restartButton == null) {
+                return;
+            }
+            restartButton.setEnabled(!pending);
+            restartButton.setAlpha(1f);
+            if (pending) {
+                startRestartButtonAnimation();
+            }
+        } catch (Throwable throwable) {
+            try {
+                Log.w(TAG, "Failed to update Gboard restart action", throwable);
+            } catch (Throwable ignored) {
+                // A restart failure must never escape into the host app.
+            }
+        }
+    }
+
+    private void startRestartButtonAnimation() {
+        stopRestartButtonAnimation();
+        if (restartButton == null) {
+            return;
+        }
+        restartButtonAnimator = ObjectAnimator.ofFloat(
+                restartButton,
+                View.ROTATION,
+                0f,
+                -360f);
+        restartButtonAnimator.setDuration(RESTART_ICON_ROTATION_DURATION_MS);
+        restartButtonAnimator.setInterpolator(new LinearInterpolator());
+        restartButtonAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        restartButtonAnimator.start();
+    }
+
+    private void stopRestartButtonAnimation() {
+        if (restartButtonAnimator != null) {
+            restartButtonAnimator.cancel();
+            restartButtonAnimator = null;
+        }
+        if (restartButton != null) {
+            restartButton.setRotation(0f);
+        }
+    }
+
+    private void handleRestartFailure(String message, Throwable throwable) {
+        try {
+            if (!GboardRestartCrashRecoveryGuard.restoreIfPending(this)) {
+                Log.w(TAG, "Failed to roll back Gboard restart guard");
+            }
+        } catch (Throwable ignored) {
+            // A restart failure must never escape into the host app.
+        }
+        try {
+            Log.w(TAG, message, throwable);
+        } catch (Throwable ignored) {
+            // A restart failure must never escape into the host app.
+        }
+        setRestartButtonPending(false);
+        try {
+            showRestartFailure();
+        } catch (Throwable notificationThrowable) {
+            try {
+                Log.w(TAG, "Failed to show Gboard restart error", notificationThrowable);
+            } catch (Throwable ignored) {
+                // A restart failure must never escape into the host app.
+            }
+        }
+    }
+
+    private void showRestartFailure() {
+        Toast.makeText(
+                this,
+                text(R.string.gboard_patches_restart_failed),
+                Toast.LENGTH_LONG)
+                .show();
     }
 
     private View buildBackButton() {
@@ -1585,9 +2286,29 @@ public final class GboardPatchesSettingsActivity extends Activity
 
     private void installWindowInsetsHandling(View root) {
         root.setOnApplyWindowInsetsListener((view, insets) -> {
-            updateToolbarInsets(resolveTopInset(insets));
-            if (contentScrollView != null) {
-                contentScrollView.setPadding(0, 0, 0, resolveBottomInset(insets));
+            try {
+                updateToolbarInsets(resolveTopInset(insets));
+                int bottomInset = resolveBottomInset(insets);
+                if (contentScrollView != null) {
+                    int bottomPadding = keyboardPreviewController == null
+                            ? bottomInset
+                            : keyboardPreviewController.contentBottomPadding(bottomInset);
+                    contentScrollView.setPadding(0, 0, 0, bottomPadding);
+                }
+                if (screenActionContainer != null) {
+                    screenActionContainer.setPadding(
+                            dp(16), dp(8), dp(16), dp(16) + bottomInset);
+                }
+                if (keyboardPreviewController != null) {
+                    keyboardPreviewController.updateSafeAreaInsets(resolveRightInset(insets),
+                            bottomInset);
+                }
+            } catch (Throwable throwable) {
+                try {
+                    Log.w(TAG, "Failed to apply patches settings insets", throwable);
+                } catch (Throwable ignored) {
+                    // Insets are optional UI polish and must not affect the settings host.
+                }
             }
             return insets;
         });
@@ -1673,7 +2394,33 @@ public final class GboardPatchesSettingsActivity extends Activity
                     break;
             }
         }
+        syncVisibleFeatureLifecycle();
         return exitRequested;
+    }
+
+    private void syncVisibleFeatureLifecycle() {
+        GboardPatchesSettingsContract.Feature target = featureLifecycleEnabled
+                ? settingsOrchestrator.snapshot().getCurrent()
+                : null;
+        if (target == lifecycleVisibleFeature) {
+            return;
+        }
+        GboardPatchesSettingsContract.Feature previous = lifecycleVisibleFeature;
+        lifecycleVisibleFeature = target;
+        if (previous != null) {
+            try {
+                previous.onHidden(this);
+            } catch (Throwable throwable) {
+                Log.w(TAG, "Failed to hide settings feature", throwable);
+            }
+        }
+        if (target != null) {
+            try {
+                target.onVisible(this);
+            } catch (Throwable throwable) {
+                Log.w(TAG, "Failed to show settings feature", throwable);
+            }
+        }
     }
 
     private void enqueueScreenBuild(int buildGeneration) {
@@ -1843,6 +2590,14 @@ public final class GboardPatchesSettingsActivity extends Activity
         return insets.getSystemWindowInsetBottom();
     }
 
+    private int resolveRightInset(WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Insets systemBarsInsets = insets.getInsets(WindowInsets.Type.systemBars());
+            return systemBarsInsets.right;
+        }
+        return insets.getSystemWindowInsetRight();
+    }
+
     private void renderCurrentScreenSafely() {
         initializeFeaturesAndRenderSafely();
     }
@@ -1861,6 +2616,16 @@ public final class GboardPatchesSettingsActivity extends Activity
         }
         for (GboardPatchesSettingsContract.Section section : screen.getSections()) {
             panelContainer.addView(createSectionView(section));
+        }
+        screenActionContainer.removeAllViews();
+        GboardPatchesSettingsContract.CommandRow primaryAction = screen.getPrimaryAction();
+        if (primaryAction == null) {
+            screenActionContainer.setVisibility(View.GONE);
+        } else {
+            screenActionContainer.addView(createSectionView(
+                    new GboardPatchesSettingsContract.Section(
+                            null, Collections.singletonList(primaryAction))));
+            screenActionContainer.setVisibility(View.VISIBLE);
         }
         int requestedScrollY = consumeRequestedScrollPositionOnNextScreenApply();
         if (requestedScrollY >= 0) {
@@ -1915,35 +2680,32 @@ public final class GboardPatchesSettingsActivity extends Activity
         if (intent == null) {
             return false;
         }
-        boolean tilePreferencesIntent = ACTION_QS_TILE_PREFERENCES.equals(intent.getAction());
-        boolean openWebClipboard = intent.getBooleanExtra(EXTRA_OPEN_WEB_CLIPBOARD, false);
-        if (!tilePreferencesIntent && !openWebClipboard) {
-            return false;
+        if (restoreNavigationPathFromIntent(intent)) {
+            return true;
         }
-        GboardClipboardSettingsFeature clipboardFeature = findClipboardFeature();
-        if (clipboardFeature == null) {
-            return false;
-        }
-        GboardPatchesSettingsContract.Feature webClipboardFeature =
-                clipboardFeature.getWebClipboardFeature();
-        runOnUiThread(() -> {
-            List<GboardPatchesSettingsContract.Feature> featurePath =
-                    Arrays.asList(clipboardFeature, webClipboardFeature);
-            scrollState.resetForDirectPath(featurePath.size() - 1);
-            requestScrollPositionOnNextScreenApply(0);
-            applyOrchestration(settingsOrchestrator.accept(
-                    GboardPatchesSettingsOrchestrator.Event.replacePath(featurePath)));
-        });
-        return true;
+        return false;
     }
 
-    private GboardClipboardSettingsFeature findClipboardFeature() {
-        for (GboardPatchesSettingsContract.Feature feature : features) {
-            if (GboardClipboardSettingsFeature.class.isInstance(feature)) {
-                return (GboardClipboardSettingsFeature) feature;
-            }
+    private boolean restoreNavigationPathFromIntent(Intent intent) {
+        if (!intent.hasExtra(EXTRA_NAVIGATION_PATH)) {
+            return false;
         }
-        return null;
+        ArrayList<String> pathIds = intent.getStringArrayListExtra(EXTRA_NAVIGATION_PATH);
+        intent.removeExtra(EXTRA_NAVIGATION_PATH);
+        List<GboardPatchesSettingsContract.Feature> resolvedPath =
+                GboardPatchesNavigationPath.resolve(this, features, pathIds);
+        if (pathIds == null
+                || pathIds.isEmpty()
+                || resolvedPath.size() != pathIds.size()) {
+            return false;
+        }
+        runOnUiThread(() -> {
+            scrollState.resetForDirectPath(resolvedPath.size() - 1);
+            requestScrollPositionOnNextScreenApply(0);
+            applyOrchestration(settingsOrchestrator.accept(
+                    GboardPatchesSettingsOrchestrator.Event.replacePath(resolvedPath)));
+        });
+        return true;
     }
 
     private int currentScrollY() {
@@ -1989,18 +2751,22 @@ public final class GboardPatchesSettingsActivity extends Activity
     private void showFatalFallbackScreen(String reason, Throwable throwable) {
         settingsOrchestrator.accept(GboardPatchesSettingsOrchestrator.Event.fatal());
         cancelScheduledScreenRefresh();
+        setRestartButtonPending(false);
         Log.e(TAG, reason, throwable);
+        detachKeyboardPreviewSafely();
         if (palette == null) {
             palette = Palette.forConfiguration(getResources().getConfiguration());
         }
         toolbarView = null;
         toolbarTitleView = null;
+        restartButton = null;
         headerBadgeView = null;
         headerTitleView = null;
         headerSummaryView = null;
         panelContainer = null;
         contentScrollView = null;
         contentColumn = null;
+        screenActionContainer = null;
         setContentView(buildFatalFallbackView());
     }
 
@@ -2036,6 +2802,21 @@ public final class GboardPatchesSettingsActivity extends Activity
         root.addView(titleView);
         root.addView(summaryView, summaryParams);
         return root;
+    }
+
+    private void detachKeyboardPreviewSafely() {
+        GboardKeyboardPreviewController controller = keyboardPreviewController;
+        keyboardPreviewController = null;
+        if (controller == null) return;
+        try {
+            controller.detach();
+        } catch (Throwable throwable) {
+            try {
+                Log.w(TAG, "Failed to detach keyboard preview", throwable);
+            } catch (Throwable ignored) {
+                // Activity teardown must continue even if diagnostics fail.
+            }
+        }
     }
 
     private GboardPatchesSettingsContract.Screen buildRootScreen() {
@@ -2867,6 +3648,16 @@ public final class GboardPatchesSettingsActivity extends Activity
 
         PendingTextDocumentWrite(String text, Runnable completionAction) {
             this.text = text;
+            this.completionAction = completionAction;
+        }
+    }
+
+    private static final class PendingBinaryDocumentWrite {
+        final byte[] data;
+        final Runnable completionAction;
+
+        PendingBinaryDocumentWrite(byte[] data, Runnable completionAction) {
+            this.data = data;
             this.completionAction = completionAction;
         }
     }

@@ -13,6 +13,8 @@ public final class GboardPatchesFeatureAvailability {
             "dev.jason.gboardpatches.feature.clipboard_content_limit";
     public static final String FEATURE_WEB_CLIPBOARD =
             "dev.jason.gboardpatches.feature.web_clipboard";
+    public static final String FEATURE_LAN_FTP =
+            "dev.jason.gboardpatches.feature.lan_ftp_server";
     public static final String FEATURE_DEVICE_INTELLIGENCE =
             "dev.jason.gboardpatches.feature.device_intelligence";
     public static final String FEATURE_GRAMMAR_CHECKER =
@@ -39,6 +41,8 @@ public final class GboardPatchesFeatureAvailability {
             "dev.jason.gboardpatches.feature.top_row_swipe";
     public static final String FEATURE_DEVELOPER_OPTIONS =
             "dev.jason.gboardpatches.feature.developer_options";
+    public static final String FEATURE_BACKUP_RESTORE =
+            "dev.jason.gboardpatches.feature.backup_restore";
     public static final String FEATURE_LONG_PRESS_QUICK_ACTIONS =
             "dev.jason.gboardpatches.feature.long_press_quick_actions";
     public static final String FEATURE_ADVANCED_VOICE_TYPING =
@@ -49,6 +53,32 @@ public final class GboardPatchesFeatureAvailability {
             "dev.jason.gboardpatches.feature.ocr_scan_text";
     public static final String FEATURE_MANUAL_INCOGNITO =
             "dev.jason.gboardpatches.feature.manual_incognito";
+    public static final String FEATURE_EMOJI_SIZE =
+            "dev.jason.gboardpatches.feature.emoji_size";
+    public static final String FEATURE_CURSOR_TRACKPAD =
+            "dev.jason.gboardpatches.feature.cursor_trackpad";
+    public static final String FEATURE_ACCESS_POINTS_MENU_STYLE =
+            "dev.jason.gboardpatches.feature.access_points_menu_style";
+    public static final String FEATURE_SPLIT_KEYBOARD =
+            "dev.jason.gboardpatches.feature.split_keyboard";
+    public static final String FEATURE_ACCESSIBILITY_LAYOUT =
+            "dev.jason.gboardpatches.feature.accessibility_layout";
+    public static final String FEATURE_ROUNDED_KEYBOARD_PANEL =
+            "dev.jason.gboardpatches.feature.rounded_keyboard_panel";
+    public static final String FEATURE_SPACEBAR_LOGO =
+            "dev.jason.gboardpatches.feature.spacebar_logo";
+    public static final String FEATURE_CLOSE_PROACTIVE_SUGGESTIONS =
+            "dev.jason.gboardpatches.feature.close_proactive_suggestions";
+    public static final String FEATURE_FLOW_MODE_ANIMATION =
+            "dev.jason.gboardpatches.feature.flow_mode_animation";
+    public static final String FEATURE_QUICK_INSERT =
+            "dev.jason.gboardpatches.feature.quick_insert";
+    public static final String FEATURE_ACCESS_POINT_COUNT =
+            "dev.jason.gboardpatches.feature.access_point_count";
+    public static final String FEATURE_FLOATING_WEB_SEARCH =
+            "dev.jason.gboardpatches.feature.floating_web_search";
+    public static final String FEATURE_SIMPLE_CALCULATOR =
+            "dev.jason.gboardpatches.feature.simple_calculator";
 
     private static final String TAG = "GboardPatches";
 
@@ -93,8 +123,12 @@ public final class GboardPatchesFeatureAvailability {
             }
             return false;
         } catch (Throwable throwable) {
-            Log.w(TAG, "Failed to resolve feature marker: " + describeFeatures(featureKeys),
-                    throwable);
+            try {
+                Log.w(TAG, "Failed to resolve feature marker: " + describeFeatures(featureKeys),
+                        throwable);
+            } catch (Throwable ignored) {
+                // Feature detection still fails closed when logging is unavailable.
+            }
             return false;
         }
     }

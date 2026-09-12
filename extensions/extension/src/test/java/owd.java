@@ -13,11 +13,12 @@ public final class owd {
         this(keyId, new EnumMap<oth, otk>(oth.class), new CharSequence[0], new int[0]);
     }
 
-    owd(int keyId, Map<oth, otk> sourceActions) {
+    public owd(int keyId, Map<oth, otk> sourceActions) {
         this(keyId, sourceActions, new CharSequence[0], new int[0]);
     }
 
-    owd(int keyId, Map<oth, otk> sourceActions, CharSequence[] labels, int[] labelIds) {
+    public owd(int keyId, Map<oth, otk> sourceActions,
+            CharSequence[] labels, int[] labelIds) {
         d = keyId;
         actions = new EnumMap<oth, otk>(oth.class);
         actions.putAll(sourceActions);
@@ -39,7 +40,7 @@ public final class owd {
         return exact != null ? exact : h(oth.PRESS);
     }
 
-    EnumMap<oth, otk> copyActions() {
+    public EnumMap<oth, otk> copyActions() {
         return new EnumMap<oth, otk>(actions);
     }
 
@@ -50,6 +51,15 @@ public final class owd {
         actionBuilder.q(-0x2719, ouc.COMMIT, "");
         EnumMap<oth, otk> actions = new EnumMap<oth, otk>(oth.class);
         actions.put(oth.SLIDE_UP, actionBuilder.c());
+        return new owd(keyId, actions);
+    }
+
+    public static owd actionWithKeyCode(int keyId, int keyCode) {
+        EnumMap<oth, otk> actions = new EnumMap<oth, otk>(oth.class);
+        actions.put(oth.PRESS, new otk(
+                oth.PRESS,
+                new oud[] {new oud(keyCode, null, null)},
+                new String[0]));
         return new owd(keyId, actions);
     }
 

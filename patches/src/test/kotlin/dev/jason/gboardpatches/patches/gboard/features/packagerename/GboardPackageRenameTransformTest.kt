@@ -21,6 +21,88 @@ import org.w3c.dom.Element
 
 class GboardPackageRenameTransformTest {
     @Test
+    fun `application display name changes one attribute and preserves component labels`() {
+        val manifest = loadManifest()
+        val application = elements(manifest, "application").single()
+        val componentLabelsBefore = componentLabels(manifest)
+        val latinIme = elements(manifest, "service").single { element ->
+            androidAttribute(element, "name") == "com.android.inputmethod.latin.LatinIME"
+        }
+        val launcher = elements(manifest, "activity").single { element ->
+            androidAttribute(element, "name") ==
+                "com.google.android.libraries.inputmethod.launcher.LauncherActivity"
+        }
+
+        assertEquals("@string/ime_name", androidAttribute(application, "label"))
+        assertEquals(null, androidAttribute(latinIme, "label"))
+        assertEquals(null, androidAttribute(launcher, "label"))
+
+        applyGboardApplicationDisplayName(manifest, "Gboard Dev")
+
+        assertEquals("Gboard Dev", androidAttribute(application, "label"))
+        assertEquals(componentLabelsBefore, componentLabels(manifest))
+    }
+
+    @Test
+    fun `application display name replaces label in namespace unaware cli documents`() {
+        val manifest = parse(readFixtureBytes(MANIFEST_FIXTURE), namespaceAware = false)
+        val application = elements(manifest, "application").single()
+
+        applyGboardApplicationDisplayName(manifest, "Gboard Dev")
+
+        assertEquals("Gboard Dev", androidAttribute(application, "label"))
+        assertEquals(
+            1,
+            application.attributes.asList().count { attribute ->
+                attribute.nodeName == "android:label" ||
+                    (attribute.namespaceURI == ANDROID_NS && attribute.localName == "label")
+            },
+        )
+        assertFalse(serialize(manifest).contains("android:label=\"@string/ime_name\""))
+    }
+
+    @Test
+    fun `application display name accepts safe unicode and rejects unsafe values`() {
+        listOf(
+            "Gboard Dev",
+            "Jason 鍵盤",
+            "Keyboard 🚀",
+            "x".repeat(MAX_GBOARD_APP_DISPLAY_NAME_CODE_POINTS),
+        ).forEach { value ->
+            assertTrue(value, isValidGboardAppDisplayName(value))
+        }
+
+        listOf(
+            null,
+            "",
+            " ",
+            " Gboard Dev",
+            "Gboard Dev ",
+            "@string/ime_name",
+            "?attr/appName",
+            "Gboard\nDev",
+            "Gboard\u0000Dev",
+            "Gboard\u2028Dev",
+            "x".repeat(MAX_GBOARD_APP_DISPLAY_NAME_CODE_POINTS + 1),
+        ).forEach { value ->
+            assertFalse(value, isValidGboardAppDisplayName(value))
+        }
+    }
+
+    @Test
+    fun `application display name requires exactly one application element`() {
+        val manifest = loadManifest()
+        manifest.documentElement.appendChild(manifest.createElement("application"))
+        val before = serialize(manifest)
+
+        assertFails<IllegalStateException> {
+            applyGboardApplicationDisplayName(manifest, "Gboard Dev")
+        }
+
+        assertEquals(before, serialize(manifest))
+    }
+
+    @Test
     fun `mapping inventory is the exact fifteen target attributes`() {
         val actual = GBOARD_PACKAGE_RENAME_MAPPINGS.map { mapping ->
             listOf(
@@ -54,13 +136,44 @@ class GboardPackageRenameTransformTest {
     }
 
     @Test
+    fun `standalone package rename removes required split markers but retains split inventory`() {
+        val manifest = loadManifest()
+        val root = manifest.documentElement
+        val requiredSplitMetadata = elements(manifest, "meta-data").single { element ->
+            androidAttribute(element, "name") == "com.android.vending.splits.required"
+        }
+        val splitInventoryMetadata = elements(manifest, "meta-data").single { element ->
+            androidAttribute(element, "name") == "com.android.vending.splits"
+        }
+
+        assertTrue(root.hasAttributeNS(ANDROID_NS, "requiredSplitTypes"))
+        assertTrue(root.hasAttributeNS(ANDROID_NS, "splitTypes"))
+        assertEquals("true", androidAttribute(requiredSplitMetadata, "value"))
+        assertEquals("@xml/splits0", androidAttribute(splitInventoryMetadata, "resource"))
+
+        applyGboardPackageRename(manifest, loadSettingsDocuments())
+
+        assertFalse(root.hasAttributeNS(ANDROID_NS, "requiredSplitTypes"))
+        assertFalse(root.hasAttributeNS(ANDROID_NS, "splitTypes"))
+        assertTrue(elements(manifest, "meta-data").none { element ->
+            androidAttribute(element, "name") == "com.android.vending.splits.required"
+        })
+        assertEquals(
+            "@xml/splits0",
+            elements(manifest, "meta-data").single { element ->
+                androidAttribute(element, "name") == "com.android.vending.splits"
+            }.let { element -> androidAttribute(element, "resource") },
+        )
+    }
+
+    @Test
     fun `stock target component inventory is pinned and preserved`() {
         val manifest = loadManifest()
         val before = componentNames(manifest)
 
-        assertEquals(28, before.getValue("activity").size)
-        assertEquals(24, before.getValue("service").size)
-        assertEquals(11, before.getValue("receiver").size)
+        assertEquals(30, before.getValue("activity").size)
+        assertEquals(22, before.getValue("service").size)
+        assertEquals(12, before.getValue("receiver").size)
         assertEquals(8, before.getValue("provider").size)
         assertEquals(0, manifest.getElementsByTagName("activity-alias").length)
         assertTrue(before.values.flatten().none { name -> name.startsWith(".") })
@@ -399,9 +512,9 @@ class GboardPackageRenameTransformTest {
         }
 
         val components = componentNames(manifest)
-        assertEquals(29, components.getValue("activity").size)
-        assertEquals(24, components.getValue("service").size)
-        assertEquals(11, components.getValue("receiver").size)
+        assertEquals(31, components.getValue("activity").size)
+        assertEquals(22, components.getValue("service").size)
+        assertEquals(12, components.getValue("receiver").size)
         assertEquals(9, components.getValue("provider").size)
         assertTrue(components.values.flatten().contains(SETTINGS_ACTIVITY_CLASS))
         assertTrue(components.values.flatten().contains(SETTINGS_PROVIDER_CLASS))
@@ -450,6 +563,14 @@ class GboardPackageRenameTransformTest {
                 }
             }
         }
+
+    private fun componentLabels(document: Document): Map<Pair<String, String>, String?> =
+        COMPONENT_TAGS.flatMap { tag ->
+            elements(document, tag).map { element ->
+                (tag to checkNotNull(androidAttribute(element, "name"))) to
+                    androidAttribute(element, "label")
+            }
+        }.toMap()
 
     private fun originalPackageName(document: Document): String =
         checkNotNull(
@@ -526,12 +647,12 @@ class GboardPackageRenameTransformTest {
         const val SETTINGS_PROVIDER_CLASS =
             "dev.jason.gboardpatches.extension.settings.GboardPatchesSettingsProvider"
         const val MANIFEST_FIXTURE =
-            "/gboard/17.7.7/package-rename/AndroidManifest.normalized.xml"
-        const val SETTINGS_FIXTURE = "/gboard/17.7.7/package-rename/settings.xml"
+            "/gboard/18.0.3/package-rename/AndroidManifest.normalized.xml"
+        const val SETTINGS_FIXTURE = "/gboard/18.0.3/package-rename/settings.xml"
         const val SETTINGS_LEGACY_FIXTURE =
-            "/gboard/17.7.7/package-rename/settings_legacy.xml"
+            "/gboard/18.0.3/package-rename/settings_legacy.xml"
         const val RETAINED_LITERALS_FIXTURE =
-            "/gboard/17.7.7/package-rename/retained-resource-literals.xml"
+            "/gboard/18.0.3/package-rename/retained-resource-literals.xml"
         val COMPONENT_TAGS = listOf("activity", "service", "receiver", "provider")
         val EXPECTED_MAPPINGS = listOf(
             listOf("manifest", "package", SOURCE_PACKAGE, FINAL_PACKAGE),

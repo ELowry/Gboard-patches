@@ -22,7 +22,7 @@ public final class GboardAdvancedVoiceSettingsFeature
         implements GboardPatchesSettingsContract.Feature {
     private static final String TAG = "GboardPatches";
     private static final String APKMIRROR_DOWNLOAD_URL =
-            "https://www.apkmirror.com/apk/google-inc/gboard/gboard-the-google-keyboard-17-7-7-932364120-release/gboard-the-google-keyboard-17-7-7-932364120-release-arm64-v8a-android-apk-download/";
+            "https://www.apkmirror.com/apk/google-inc/gboard/gboard-the-google-keyboard-18-0-3-954559732-release/gboard-the-google-keyboard-18-0-3-954559732-release-arm64-v8a-2-android-apk-download/";
     private static final String ADVANCED_VOICE_GITHUB_URL =
             "https://github.com/jasonwu1994/Gboard-patches";
 
@@ -220,21 +220,13 @@ public final class GboardAdvancedVoiceSettingsFeature
                     enabledSummary,
                     true,
                     enabled,
-                    value -> {
-                        GboardAdvancedVoiceSettings.writeEnabled(context, value);
-                        Log.i(TAG, "Saved Advanced Voice Typing enabled=" + value);
-                    }));
+                    value -> saveEnabled(host, context, value)));
             behaviorRows.add(new GboardPatchesSettingsContract.ToggleRow(
                     zhTwPunctuationTitle,
                     zhTwPunctuationSummary,
-                    true,
+                    enabled,
                     zhTwPunctuationEnabled,
-                    value -> {
-                        GboardAdvancedVoiceSettings.writeZhTwPunctuationEnabled(
-                                context,
-                                value);
-                        Log.i(TAG, "Saved zh-TW punctuation enabled=" + value);
-                    }));
+                    value -> saveZhTwPunctuationEnabled(context, value)));
 
             List<GboardPatchesSettingsContract.Row> informationRows =
                     new ArrayList<GboardPatchesSettingsContract.Row>();
@@ -322,6 +314,34 @@ public final class GboardAdvancedVoiceSettingsFeature
                 headerSummary,
                 statusBlocks,
                 Collections.emptyList());
+    }
+
+    private void saveEnabled(GboardPatchesSettingsContract.FeatureHost host,
+            Context context, boolean enabled) {
+        try {
+            GboardAdvancedVoiceSettings.writeEnabled(context, enabled);
+            Log.i(TAG, "Saved Advanced Voice Typing enabled=" + enabled);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to save enhanced voice typing state", throwable);
+        }
+        refreshSafely(host);
+    }
+
+    private void saveZhTwPunctuationEnabled(Context context, boolean enabled) {
+        try {
+            GboardAdvancedVoiceSettings.writeZhTwPunctuationEnabled(context, enabled);
+            Log.i(TAG, "Saved zh-TW punctuation enabled=" + enabled);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to save zh-TW punctuation state", throwable);
+        }
+    }
+
+    private void refreshSafely(GboardPatchesSettingsContract.FeatureHost host) {
+        try {
+            GboardPatchesSettingsContract.refresh(host);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "Failed to refresh Advanced Voice Typing settings", throwable);
+        }
     }
 
     private PayloadGuidance buildPayloadGuidance(

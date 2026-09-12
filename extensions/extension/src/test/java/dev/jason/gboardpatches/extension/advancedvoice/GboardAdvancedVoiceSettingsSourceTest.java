@@ -21,11 +21,20 @@ public final class GboardAdvancedVoiceSettingsSourceTest {
         String availability = read(root,
                 "extensions/extension/src/main/java/dev/jason/gboardpatches/extension/"
                         + "settings/GboardPatchesFeatureAvailability.java");
+        String settingsText = read(root,
+                "extensions/extension/src/main/settings-text/gboard_settings_text.xml");
 
         Assert.assertTrue(keyboardGroup.contains(
                 "new GboardAdvancedVoiceSettingsFeature(context)"));
         Assert.assertEquals(2, count(feature,
                 "new GboardPatchesSettingsContract.ToggleRow("));
+        Assert.assertEquals(0, count(feature,
+                "new GboardPatchesSettingsContract.SelectorRow("));
+        Assert.assertFalse(feature.contains("GboardAdvancedVoiceSettings.readBackend("));
+        Assert.assertFalse(feature.contains("showBackendDialog("));
+        Assert.assertFalse(feature.contains("saveBackend("));
+        Assert.assertTrue(feature.contains("refreshSafely("));
+        Assert.assertFalse(feature.contains("BACKEND_RAMBLER"));
         Assert.assertTrue(feature.contains(
                 "new GboardPatchesSettingsContract.DetailRow("));
         Assert.assertTrue(feature.contains(
@@ -54,10 +63,14 @@ public final class GboardAdvancedVoiceSettingsSourceTest {
         Assert.assertTrue(feature.matches(
                 "(?s).*new GboardPatchesSettingsContract\\.Section\\("
                         + "\\s*null,\\s*githubStarRows\\).*"));
-        Assert.assertTrue(feature.contains("17-7-7-932364120-release-arm64-v8a"));
+        Assert.assertTrue(feature.contains("18-0-3-954559732-release-arm64-v8a-2"));
         Assert.assertTrue(availability.contains("FEATURE_ADVANCED_VOICE_TYPING"));
         Assert.assertTrue(availability.contains(
                 "dev.jason.gboardpatches.feature.advanced_voice_typing"));
+        Assert.assertTrue(settingsText.contains("Rambler(限線上)"));
+        Assert.assertTrue(settingsText.contains(
+                "切換後須強制停止並重新啟動 Gboard 才會生效"));
+        Assert.assertFalse(settingsText.contains("Experimental Rambler"));
 
     }
 
